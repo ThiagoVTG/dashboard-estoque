@@ -33,7 +33,7 @@ except ImportError:
 
 # Fonte ativa: "sheets" lê do Google Sheets | "local" lê dos arquivos abaixo
 # Em CI (GitHub Actions) a env var DASHBOARD_FONTE sobrescreve este valor.
-FONTE = os.environ.get("DASHBOARD_FONTE", "local")
+FONTE = os.environ.get("DASHBOARD_FONTE", "sheets")
 
 # ── Google Sheets — duas planilhas separadas ─────────────────────────────────
 SHEETS_ID_PEDIDOS  = "1q4dB7sZPzNBptN306gsi4fSH1mV3f5xpq9yAjbtcq38"
@@ -41,6 +41,7 @@ GID_PEDIDOS        = 1706031004
 
 SHEETS_ID_ESTOQUE  = "1QBExoLdbwsd9NQRXKOibTrYx9vqOED5KEZQR_HvdAmk"
 GID_ESTOQUE        = 1703010103
+GID_VENDAS         = 673619355
 
 # Credencial: arquivo local OU conteúdo JSON via env var (GitHub Actions Secret)
 CREDENCIAIS        = Path(__file__).parent / "credenciais_sheets.json"
@@ -123,6 +124,81 @@ def carregar_do_sheets():
     print(f"  {len(df_est)} linhas de estoque carregadas da aba '{ws_est.title}'")
 
     return df_ped, df_est
+
+
+# ─── CARGA DE VENDAS MENSAIS ─────────────────────────────────────────────────
+def carregar_vendas_mensais():
+    """Lê VENDA MES QTDE e retorna dict {desc_norm: {media_6m, pico_12m}}."""
+    if not HAS_GSPREAD:
+        return {}
+    MES_PT = {'jan':1,'fev':2,'mar':3,'abr':4,'mai':5,'jun':6,
+              'jul':7,'ago':8,'set':9,'out':10,'nov':11,'dez':12}
+    try:
+        gc = _get_gspread_client()
+        sh = gc.open_by_key(SHEETS_ID_ESTOQUE)
+        ws = sh.get_worksheet_by_id(GID_VENDAS)
+        rows = ws.get_all_values()
+        print(f"  VENDA MES QTDE: {len(rows)} linhas carregadas")
+    except Exception as e:
+        print(f"  Aviso: não foi possível carregar VENDA MES QTDE: {e}")
+        return {}
+
+    if len(rows) < 3:
+        return {}
+
+    # Linha 1-2: totais e rótulos de ano; linha 3 (índice 2) = cabeçalho real
+    header    = rows[2]
+    data_rows = rows[3:]
+
+    # Identificar colunas mensais (padrão "jan./24" ou "jan/24")
+    month_cols = []
+    for i, h in enumerate(header):
+        m = re.match(r'(\w{3})\.?/(\d{2})', str(h).strip())
+        if m:
+            mes = MES_PT.get(m.group(1).lower())
+            ano = int(m.group(2)) + 2000
+            if mes:
+                month_cols.append((i, ano, mes))
+
+    if not month_cols:
+        return {}
+
+    # Ordenar e cortar meses futuros
+    month_cols.sort(key=lambda x: (x[1], x[2]))
+    hoje = datetime.today()
+    month_cols = [(i, y, m) for i, y, m in month_cols if (y, m) <= (hoje.year, hoje.month)]
+
+    last_12 = month_cols[-12:] if len(month_cols) >= 12 else month_cols
+    last_6  = month_cols[-6:]  if len(month_cols) >= 6  else month_cols
+
+    # Coluna de descrição
+    desc_col = next((i for i, h in enumerate(header) if 'descri' in str(h).lower()), None)
+    if desc_col is None:
+        return {}
+
+    result = {}
+    for row in data_rows:
+        if not row or not any(r.strip() for r in row):
+            continue
+        desc = row[desc_col].strip() if desc_col < len(row) else ''
+        if not desc:
+            continue
+
+        def gv(col_idx):
+            if col_idx >= len(row):
+                return 0.0
+            return safe_float(row[col_idx])
+
+        vals_12 = [gv(i) for i, y, m in last_12]
+        vals_6  = [gv(i) for i, y, m in last_6]
+
+        media_6m = round(sum(vals_6) / len(vals_6), 1) if vals_6 else 0.0
+        pico_12m = int(max(vals_12)) if vals_12 else 0
+
+        result[normalizar(desc)] = {'media_6m': media_6m, 'pico_12m': pico_12m}
+
+    print(f"  {len(result)} produtos com histórico de vendas")
+    return result
 
 
 # ─── UTILIDADES ──────────────────────────────────────────────────────────────
@@ -389,12 +465,28 @@ def carregar_estoque(df_raw=None):
 
     estoque = pd.DataFrame(rows)
 
-    # Manter apenas linha mais recente por (empresa, codigo/descricao)
+    # Passo 1: manter apenas período mais recente por (empresa, desc_norm)
+    # Ordenar por período DESC e saldo DESC: garante que, para o mesmo período,
+    # a linha com maior saldo seja mantida (sort_values não é estável por padrão)
     if "periodo" in estoque.columns and estoque["periodo"].any():
-        estoque = estoque.sort_values("periodo", ascending=False)
+        estoque = estoque.sort_values(["periodo", "saldo_atual"], ascending=[False, False])
         estoque = estoque.drop_duplicates(subset=["empresa", "desc_norm"], keep="first")
     else:
+        estoque = estoque.sort_values("saldo_atual", ascending=False)
         estoque = estoque.drop_duplicates(subset=["empresa", "desc_norm"], keep="first")
+
+    # Passo 2: somar estoque de todas as empresas para o mesmo produto
+    # (planilha consolida Vitta Gold + Eco Beauty — o saldo total é a soma)
+    num_cols = [c for c in ["saldo_atual","estoque_futuro","pendente_saida","pendente_entrada",
+                             "vendas_historico","estoque_minimo","necessidade_compra",
+                             "qtde_pintados","qtde_frascos"] if c in estoque.columns]
+    agg = {c: "sum" for c in num_cols}
+    agg["cmc"] = "mean"
+    for c in ["descricao","codigo","marca","modelo","familia"]:
+        if c in estoque.columns:
+            agg[c] = "first"
+
+    estoque = estoque.groupby("desc_norm", as_index=False).agg(agg)
 
     print(f"  {len(estoque)} SKUs de estoque carregados")
     return estoque
@@ -594,6 +686,7 @@ def calcular_alocacao(df):
             saldo_restante = max(saldo_restante - alocado, 0)
             alocacao.append({
                 "produto": row["descricao"],
+                "empresa": row.get("empresa", ""),
                 "pedido": row["pedido"],
                 "cliente": row["cliente"],
                 "data": row["data"],
@@ -673,22 +766,22 @@ def calcular_gargalos(df, estoque):
 def calcular_plano_acao(df):
     plano = {
         "separar_agora": df[df["status"] == "A - Atende 100%"][
-            ["pedido", "cliente", "vendedor", "descricao", "qtde_pedido", "etapa"]
+            ["pedido", "empresa", "cliente", "vendedor", "descricao", "qtde_pedido", "etapa"]
         ].to_dict("records"),
         "separar_parcial": df[df["status"] == "B - Atende parcial"][
-            ["pedido", "cliente", "vendedor", "descricao", "qtde_pedido", "qtde_possivel", "qtde_faltante"]
+            ["pedido", "empresa", "cliente", "vendedor", "descricao", "qtde_pedido", "qtde_possivel", "qtde_faltante"]
         ].to_dict("records"),
         "envasar": df[df["status"] == "D - Depende de envase"][
-            ["pedido", "cliente", "descricao", "qtde_pedido", "qtde_faltante", "est_pintados"]
+            ["pedido", "empresa", "cliente", "descricao", "qtde_pedido", "qtde_faltante", "est_pintados"]
         ].to_dict("records"),
         "pintar": df[df["status"] == "E - Depende de pintura"][
-            ["pedido", "cliente", "descricao", "qtde_pedido", "qtde_faltante", "est_frascos"]
+            ["pedido", "empresa", "cliente", "descricao", "qtde_pedido", "qtde_faltante", "est_frascos"]
         ].to_dict("records"),
         "comprar": df[df["status"] == "F - Depende de compra"][
-            ["pedido", "cliente", "descricao", "qtde_pedido", "qtde_faltante"]
+            ["pedido", "empresa", "cliente", "descricao", "qtde_pedido", "qtde_faltante"]
         ].to_dict("records"),
         "validar_comercial": df[df["status"] == "G - Decisão comercial"][
-            ["pedido", "cliente", "vendedor", "descricao", "qtde_pedido", "qtde_faltante", "demanda_total_sku"]
+            ["pedido", "empresa", "cliente", "vendedor", "descricao", "qtde_pedido", "qtde_faltante", "demanda_total_sku"]
         ].to_dict("records"),
     }
     return plano
@@ -722,6 +815,101 @@ def calcular_diagnostico(pedidos_raw, sem_match, df_merged):
         })
 
     return issues[:200]  # limitar para UI
+
+
+# ─── ESTOQUE VTG - PRODUTO ACABADO ───────────────────────────────────────────
+def calcular_estoque_vtg(df_est_raw=None, vendas_dict=None):
+    """Extrai produtos VTG - Produto acabado com CONTROLE ESTOQUE = CONTROLE."""
+    if df_est_raw is not None:
+        df = df_est_raw.copy().astype(str)
+    else:
+        try:
+            df = pd.read_excel(ESTOQUE_XLSX, sheet_name=ABA_ESTOQUE_XLSX, dtype=str, header=0)
+        except Exception:
+            return []
+    df.columns = [str(c).strip() for c in df.columns]
+    df = df.dropna(axis=1, how="all")
+
+    def fc(*candidates):
+        for cand in candidates:
+            if cand in df.columns: return cand
+        cl = {c.lower(): c for c in df.columns}
+        for cand in candidates:
+            if cand.lower() in cl: return cl[cand.lower()]
+        return None
+
+    c_emp      = fc("Minha Empresa (Nome Fantasia)")
+    c_desc     = fc("Descrição do Produto")
+    c_marca    = fc("Marca")
+    c_modelo   = fc("Modelo")
+    c_familia  = fc("Família de Produto")
+    c_controle = fc("CONTROLE ESTOQUE")
+    c_periodo  = fc("Período")
+    c_saldo    = fc("SALDO ATUAL")
+    c_futuro   = fc("Estoque Futuro")
+    c_psaida   = fc("PENDENTE SAIDA")
+    c_pentrada = fc("PENDENTE ENTRADA")
+    c_pintados = fc("QTDE PINTADOS")
+    c_frascos  = fc("QTDE FRASCOS")
+
+    def gv(row, col):
+        if not col or col not in row.index: return ""
+        v = row[col]
+        return "" if pd.isna(v) else str(v).strip()
+
+    rows = []
+    for _, r in df.iterrows():
+        familia  = gv(r, c_familia)
+        controle = gv(r, c_controle)
+        if familia != "VTG - Produto acabado": continue
+        if controle != "CONTROLE": continue
+        desc = gv(r, c_desc)
+        if not desc: continue
+        rows.append({
+            "empresa":  gv(r, c_emp),
+            "desc_norm": normalizar(desc),
+            "descricao": desc,
+            "marca":    gv(r, c_marca),
+            "modelo":   gv(r, c_modelo),
+            "periodo":  gv(r, c_periodo),
+            "saldo_atual":    safe_float(gv(r, c_saldo)),
+            "estoque_futuro": safe_float(gv(r, c_futuro)),
+            "pend_saida":     safe_float(gv(r, c_psaida)),
+            "pend_entrada":   safe_float(gv(r, c_pentrada)),
+            "qtde_pintados":  safe_float(gv(r, c_pintados)),
+            "qtde_frascos":   safe_float(gv(r, c_frascos)),
+        })
+
+    if not rows:
+        return []
+
+    est = pd.DataFrame(rows)
+
+    # Dedup: período mais recente + maior saldo por (empresa, desc_norm)
+    if est["periodo"].any():
+        est = est.sort_values(["periodo", "saldo_atual"], ascending=[False, False])
+    else:
+        est = est.sort_values("saldo_atual", ascending=False)
+    est = est.drop_duplicates(subset=["empresa", "desc_norm"], keep="first")
+
+    # Somar por produto único (desc_norm) entre empresas
+    num_cols = ["saldo_atual", "estoque_futuro", "pend_saida", "pend_entrada", "qtde_pintados", "qtde_frascos"]
+    agg = {c: "sum" for c in num_cols}
+    agg.update({"descricao": "first", "marca": "first", "modelo": "first"})
+    est = est.groupby("desc_norm", as_index=False).agg(agg)
+
+    # Enriquecer com dados de vendas mensais
+    vd = vendas_dict or {}
+    est["media_6m"]  = est["desc_norm"].map(lambda x: vd.get(x, {}).get("media_6m", 0.0))
+    est["pico_12m"]  = est["desc_norm"].map(lambda x: vd.get(x, {}).get("pico_12m", 0))
+    est["cobertura"] = est.apply(
+        lambda r: round(r["saldo_atual"] / r["media_6m"], 1) if r["media_6m"] > 0 else 99.0, axis=1
+    )
+
+    # Ordenar por marca → modelo → descrição
+    est = est.sort_values(["marca", "modelo", "descricao"])
+    cols_out = ["marca", "modelo", "descricao"] + num_cols + ["media_6m", "pico_12m", "cobertura"]
+    return est[cols_out].fillna(0).to_dict("records")
 
 
 # ─── KPIs EXECUTIVOS ──────────────────────────────────────────────────────────
@@ -780,7 +968,7 @@ def to_json(obj):
 
 
 # ─── GERAÇÃO HTML ─────────────────────────────────────────────────────────────
-def gerar_html(kpis, df_merged, df_alocacao, df_gargalos, plano_acao, diagnostico):
+def gerar_html(kpis, df_merged, df_alocacao, df_gargalos, plano_acao, diagnostico, estoque_vtg=None):
     print("Gerando HTML do dashboard...")
 
     pedidos_json = to_json(df_merged[[
@@ -803,6 +991,7 @@ def gerar_html(kpis, df_merged, df_alocacao, df_gargalos, plano_acao, diagnostic
     diag_json = to_json(diagnostico)
     kpis_json = to_json(kpis)
     colors_json = to_json(STATUS_COLORS)
+    estoque_vtg_json = to_json(estoque_vtg or [])
     data_geracao = datetime.now().strftime("%d/%m/%Y %H:%M")
 
     html = f"""<!DOCTYPE html>
@@ -811,38 +1000,34 @@ def gerar_html(kpis, df_merged, df_alocacao, df_gargalos, plano_acao, diagnostic
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Vitta Gold – Planejamento de Pedidos & Estoque</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600;700&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <script src="https://code.jquery.com/jquery-3.7.0.min.js"></script>
 <style>
   :root{{
-    --bg:#080704;
-    --surface:#100f0a;
-    --surface2:#171510;
-    --border:#2a2418;
-    --border-gold:#C9A84C44;
-    --text:#f0ead8;
-    --muted:#7a6e58;
+    --bg:#0f172a;
+    --surface:#1e293b;
+    --surface2:#253348;
+    --border:#334155;
+    --text:#f1f5f9;
+    --muted:#94a3b8;
+    --green:#22c55e;
+    --yellow:#f59e0b;
+    --red:#ef4444;
+    --orange:#f97316;
+    --purple:#8b5cf6;
+    --gray:#6b7280;
+    --blue:#3b82f6;
     --gold:#C9A84C;
     --gold-light:#E8D4A0;
     --gold-dark:#8B6914;
-    --gold-dim:#C9A84C22;
-    --green:#4ade80;
-    --yellow:#fbbf24;
-    --red:#f87171;
-    --orange:#fb923c;
-    --purple:#a78bfa;
-    --gray:#6b7280;
-    --blue:#60a5fa;
   }}
   *{{box-sizing:border-box;margin:0;padding:0;}}
-  body{{background:var(--bg);color:var(--text);font-family:'Inter',system-ui,sans-serif;font-size:14px;}}
+  body{{background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,sans-serif;font-size:14px;}}
 
   /* ── HEADER ── */
   header{{
     background:var(--surface);
-    border-bottom:1px solid var(--border-gold);
+    border-bottom:1px solid var(--border);
     padding:0 28px;
     display:flex;align-items:center;justify-content:space-between;
     position:sticky;top:0;z-index:100;
@@ -850,13 +1035,12 @@ def gerar_html(kpis, df_merged, df_alocacao, df_gargalos, plano_acao, diagnostic
   }}
   .header-brand{{display:flex;align-items:center;gap:14px;}}
   .header-logo{{
-    font-family:'Playfair Display',serif;
-    font-size:20px;font-weight:700;
+    font-size:20px;font-weight:700;letter-spacing:2px;
     background:linear-gradient(135deg,#E8D4A0,#C9A84C,#8B6914);
     -webkit-background-clip:text;-webkit-text-fill-color:transparent;
-    background-clip:text;letter-spacing:1px;
+    background-clip:text;
   }}
-  .header-divider{{width:1px;height:28px;background:var(--border-gold);}}
+  .header-divider{{width:1px;height:28px;background:var(--border);}}
   .header-sub{{font-size:12px;color:var(--muted);font-weight:300;letter-spacing:.5px;}}
   header .header-date{{font-size:11px;color:var(--muted);}}
 
@@ -865,14 +1049,14 @@ def gerar_html(kpis, df_merged, df_alocacao, df_gargalos, plano_acao, diagnostic
   nav button{{
     background:transparent;border:1px solid var(--border);color:var(--muted);
     padding:5px 14px;border-radius:4px;cursor:pointer;font-size:12px;
-    font-family:'Inter',sans-serif;font-weight:500;letter-spacing:.3px;
+    font-family:inherit;font-weight:500;letter-spacing:.3px;
     transition:all .2s;
   }}
-  nav button:hover{{border-color:var(--gold-dark);color:var(--gold-light);}}
+  nav button:hover{{border-color:#475569;color:#cbd5e1;}}
   nav button.active{{
-    background:linear-gradient(135deg,#1a1508,#2a1f08);
-    border-color:var(--gold);color:var(--gold);
-    box-shadow:0 0 12px var(--gold-dim);
+    background:linear-gradient(135deg,#1e3a5f,#1e40af);
+    border-color:#3b82f6;color:#93c5fd;
+    box-shadow:0 0 12px #3b82f622;
   }}
 
   .page{{display:none;padding:20px 28px;}}
@@ -883,10 +1067,10 @@ def gerar_html(kpis, df_merged, df_alocacao, df_gargalos, plano_acao, diagnostic
   .kpi-card{{
     background:var(--surface);border:1px solid var(--border);
     border-radius:8px;padding:14px 16px;
-    border-top:2px solid var(--border-gold);
+    border-top:2px solid var(--border);
     transition:border-color .2s;
   }}
-  .kpi-card:hover{{border-top-color:var(--gold);}}
+  .kpi-card:hover{{border-top-color:#3b82f6;}}
   .kpi-card .label{{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;margin-bottom:8px;font-weight:500;}}
   .kpi-card .value{{font-size:28px;font-weight:600;font-family:'Playfair Display',serif;}}
   .kpi-card .sub{{font-size:11px;color:var(--muted);margin-top:4px;}}
@@ -907,9 +1091,9 @@ def gerar_html(kpis, df_merged, df_alocacao, df_gargalos, plano_acao, diagnostic
   /* ── TABLES ── */
   .table-container{{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;overflow:auto;}}
   .section-title{{
-    font-family:'Playfair Display',serif;
+    font-family:inherit;
     font-size:18px;font-weight:600;margin-bottom:16px;
-    color:var(--gold-light);letter-spacing:.5px;
+    color:#e2e8f0;letter-spacing:.5px;
   }}
 
   /* ── FILTER BAR ── */
@@ -917,10 +1101,10 @@ def gerar_html(kpis, df_merged, df_alocacao, df_gargalos, plano_acao, diagnostic
   .filter-bar select,.filter-bar input,.search-box{{
     background:var(--surface2);border:1px solid var(--border);
     color:var(--text);border-radius:4px;padding:6px 10px;font-size:13px;
-    font-family:'Inter',sans-serif;outline:none;
+    font-family:inherit;outline:none;
     transition:border-color .2s;
   }}
-  .filter-bar select:focus,.search-box:focus{{border-color:var(--gold-dark);}}
+  .filter-bar select:focus,.search-box:focus{{border-color:#3b82f6;}}
   .search-box{{width:260px;}}
   .list-count{{font-size:12px;color:var(--muted);margin-left:4px;}}
 
@@ -933,14 +1117,14 @@ def gerar_html(kpis, df_merged, df_alocacao, df_gargalos, plano_acao, diagnostic
     white-space:nowrap;position:sticky;top:0;z-index:10;
   }}
   .grouped-table tbody td{{padding:7px 10px;border-bottom:1px solid var(--border);vertical-align:middle;}}
-  .grouped-table tbody tr:hover td{{background:rgba(201,168,76,.04);}}
+  .grouped-table tbody tr:hover td{{background:rgba(59,130,246,.04);}}
 
   /* ── GROUP HEADER ROW — separador dourado entre pedidos/produtos ── */
   .grouped-table tr.grp-hdr td{{
-    background:linear-gradient(90deg,#1a1508,#110e05);
-    border-top:2px solid var(--gold-dark);
-    border-bottom:1px solid var(--border-gold);
-    font-weight:600;font-size:12px;color:var(--gold-light);
+    background:linear-gradient(90deg,#1e293b,#0f172a);
+    border-top:2px solid #334155;
+    border-bottom:1px solid #334155;
+    font-weight:600;font-size:12px;color:#e2e8f0;
     padding:10px 10px;letter-spacing:.2px;
   }}
   .grouped-table tr.grp-hdr:first-of-type td{{border-top:none;}}
@@ -963,8 +1147,34 @@ def gerar_html(kpis, df_merged, df_alocacao, df_gargalos, plano_acao, diagnostic
   .issue-card{{background:var(--surface);border-left:2px solid var(--red);border-radius:0 4px 4px 0;padding:8px 12px;margin-bottom:6px;font-size:13px;}}
   .issue-card .tipo{{font-size:10px;color:var(--red);font-weight:600;margin-bottom:2px;text-transform:uppercase;letter-spacing:.4px;}}
 
-  /* ── GOLD DIVIDER LINE ── */
-  .gold-line{{height:1px;background:linear-gradient(90deg,transparent,var(--gold),transparent);margin:2px 0 18px;opacity:.4;}}
+  /* ── DIVIDER LINE ── */
+  .gold-line{{height:1px;background:linear-gradient(90deg,transparent,#334155,transparent);margin:2px 0 18px;opacity:.6;}}
+
+  /* ── VTG MARCA HEADER ── */
+  .vtg-marca-hdr:hover td {{ background:rgba(255,255,255,.025); }}
+  .vtg-toggle-btn {{
+    background:var(--surface2);border:1px solid var(--border);color:var(--muted);
+    padding:4px 10px;border-radius:4px;font-size:11px;cursor:pointer;font-family:inherit;
+    transition:all .15s;
+  }}
+  .vtg-toggle-btn:hover {{ border-color:#475569;color:#cbd5e1; }}
+
+  /* ── EMPRESA BADGE (estático — usado nas tabelas) ── */
+  .emp-vg{{display:inline-block;padding:1px 7px;border-radius:3px;font-size:10px;font-weight:700;letter-spacing:.5px;background:#C9A84C22;color:#C9A84C;border:1px solid #C9A84C55;}}
+  .emp-eco{{display:inline-block;padding:1px 7px;border-radius:3px;font-size:10px;font-weight:700;letter-spacing:.5px;background:#1a4a2e44;color:#4ade80;border:1px solid #2d6a4f88;}}
+
+  /* ── EMPRESA TOGGLE BUTTONS (filtro) ── */
+  .emp-filter-group{{display:flex;gap:5px;align-items:center;}}
+  .emp-btn{{
+    padding:4px 10px;border-radius:3px;font-size:11px;font-weight:700;letter-spacing:.5px;
+    cursor:pointer;border:1px solid transparent;transition:all .15s;opacity:.45;
+  }}
+  .emp-btn:hover{{opacity:.75;}}
+  .emp-btn.active{{opacity:1;}}
+  .emp-btn-vg{{background:#C9A84C22;color:#C9A84C;border-color:#C9A84C55;}}
+  .emp-btn-vg.active{{background:#C9A84C33;border-color:#C9A84C;box-shadow:0 0 8px #C9A84C33;}}
+  .emp-btn-eco{{background:#1a4a2e44;color:#4ade80;border-color:#2d6a4f88;}}
+  .emp-btn-eco.active{{background:#1a4a2e88;border-color:#4ade80;box-shadow:0 0 8px #4ade8022;}}
 </style>
 </head>
 <body>
@@ -983,6 +1193,7 @@ def gerar_html(kpis, df_merged, df_alocacao, df_gargalos, plano_acao, diagnostic
   <button onclick="showPage('gargalos',this)">4 · Gargalos por Produto</button>
   <button onclick="showPage('plano',this)">5 · Plano de Ação</button>
   <button onclick="showPage('diagnostico',this)">6 · Diagnóstico de Dados</button>
+  <button onclick="showPage('estoque-vtg',this)">7 · Estoque VTG</button>
 </nav>
 
 <!-- PAGE 1: EXECUTIVO -->
@@ -1014,7 +1225,7 @@ def gerar_html(kpis, df_merged, df_alocacao, df_gargalos, plano_acao, diagnostic
       <option>F - Depende de compra</option>
       <option>G - Decisão comercial</option>
     </select>
-    <select id="filter-empresa" onchange="filterPedidos()"><option value="">Todas as empresas</option></select>
+    <div id="emp-filter-pedidos" class="emp-filter-group"></div>
     <select id="filter-vendedor" onchange="filterPedidos()"><option value="">Todos os vendedores</option></select>
     <select id="filter-prioridade" onchange="filterPedidos()">
       <option value="">Todas as prioridades</option>
@@ -1048,6 +1259,7 @@ def gerar_html(kpis, df_merged, df_alocacao, df_gargalos, plano_acao, diagnostic
   </p>
   <div class="filter-bar">
     <input class="search-box" id="search-alocacao" placeholder="Buscar produto ou cliente..." oninput="filterAlocacao()">
+    <div id="emp-filter-alocacao" class="emp-filter-group"></div>
     <span class="list-count" id="count-alocacao"></span>
   </div>
   <div class="table-container" style="overflow:auto;max-height:80vh;">
@@ -1068,6 +1280,7 @@ def gerar_html(kpis, df_merged, df_alocacao, df_gargalos, plano_acao, diagnostic
   <div class="section-title">Gargalos por Produto / SKU</div>
   <div class="filter-bar">
     <input class="search-box" id="search-gargalos" placeholder="Buscar produto ou marca..." oninput="filterGargalos()">
+    <div id="emp-filter-gargalos" class="emp-filter-group"></div>
     <span class="list-count" id="count-gargalos"></span>
   </div>
   <div class="table-container" style="overflow:auto;max-height:80vh;">
@@ -1089,6 +1302,9 @@ def gerar_html(kpis, df_merged, df_alocacao, df_gargalos, plano_acao, diagnostic
 <!-- PAGE 5: PLANO DE AÇÃO -->
 <div id="page-plano" class="page">
   <div class="section-title">Plano de Ação Operacional</div>
+  <div class="filter-bar">
+    <div id="emp-filter-plano" class="emp-filter-group"></div>
+  </div>
   <div id="plano-container"></div>
 </div>
 
@@ -1101,6 +1317,37 @@ def gerar_html(kpis, df_merged, df_alocacao, df_gargalos, plano_acao, diagnostic
   <div id="diag-container"></div>
 </div>
 
+<!-- PAGE 7: ESTOQUE VTG -->
+<div id="page-estoque-vtg" class="page">
+  <div class="section-title">Estoque VTG — Produto Acabado</div>
+  <p style="color:var(--muted);margin-bottom:14px;font-size:13px;">
+    Produtos com família "VTG - Produto acabado" e controle de estoque ativo. Agrupado por Marca e Modelo.
+  </p>
+  <div class="filter-bar">
+    <input class="search-box" id="search-vtg" placeholder="Buscar produto, marca ou modelo..." oninput="filterVtg()">
+    <button class="vtg-toggle-btn" onclick="vtgExpandAll(true)">▼ Expandir Tudo</button>
+    <button class="vtg-toggle-btn" onclick="vtgExpandAll(false)">▶ Recolher Tudo</button>
+    <span class="list-count" id="count-vtg"></span>
+  </div>
+  <div class="table-container" style="overflow:auto;max-height:80vh;">
+    <table class="grouped-table" id="table-vtg">
+      <thead><tr>
+        <th>Produto</th>
+        <th style="text-align:right">Saldo Atual</th>
+        <th style="text-align:right">Pend. Saída</th>
+        <th style="text-align:right">Pend. Entrada</th>
+        <th style="text-align:right">Est. Futuro</th>
+        <th style="text-align:right">Pintados</th>
+        <th style="text-align:right">Frascos</th>
+        <th style="text-align:right">Média 6m</th>
+        <th style="text-align:right">Pico 12m</th>
+        <th style="text-align:right">Cobertura</th>
+      </tr></thead>
+      <tbody id="tbody-vtg"></tbody>
+    </table>
+  </div>
+</div>
+
 <script>
 // ─── DATA ────────────────────────────────────────────────────────────────────
 const KPIS = {kpis_json};
@@ -1109,6 +1356,7 @@ const ALOCACAO = {alocacao_json};
 const GARGALOS = {gargalos_json};
 const PLANO = {plano_json};
 const DIAGNOSTICO = {diag_json};
+const ESTOQUE_VTG = {estoque_vtg_json};
 const STATUS_COLORS = {colors_json};
 
 // ─── NAVIGATION ──────────────────────────────────────────────────────────────
@@ -1126,6 +1374,7 @@ function initPage(id) {{
   if (id === 'gargalos') initGargalos();
   if (id === 'plano') initPlano();
   if (id === 'diagnostico') initDiagnostico();
+  if (id === 'estoque-vtg') initEstoqueVtg();
 }}
 
 // ─── UTILS ───────────────────────────────────────────────────────────────────
@@ -1137,6 +1386,13 @@ function pbar(pct) {{
   return `<div class="pbar-wrap"><div class="pbar" style="width:${{Math.min(pct,100)}}%;background:${{c}}"></div></div> ${{pct}}%`;
 }}
 function num(v) {{ return (v == null || isNaN(v)) ? '-' : Number(v).toLocaleString('pt-BR'); }}
+function empBadge(emp) {{
+  if (!emp) return '';
+  const low = emp.toLowerCase();
+  if (low.includes('vitta')) return `<span class="emp-vg">VG</span>`;
+  if (low.includes('eco')) return `<span class="emp-eco">ECO</span>`;
+  return `<span class="badge" style="background:#2a241844;color:var(--muted);border:1px solid var(--border)">${{emp.slice(0,4).toUpperCase()}}</span>`;
+}}
 
 // ─── PAGE 1: KPIs + CHARTS ───────────────────────────────────────────────────
 (function initExecutivo() {{
@@ -1163,7 +1419,7 @@ function num(v) {{ return (v == null || isNaN(v)) ? '-' : Number(v).toLocaleStri
     if (!ctx) return;
     new Chart(ctx, {{
       type, data: {{ labels, datasets:[{{ data, backgroundColor: colors, borderColor: type==='bar'?colors:undefined, borderWidth: type==='bar'?0:2 }}] }},
-      options: {{ responsive:true, plugins:{{ legend:{{ display: type!=='bar', labels:{{ color:'#7a6e58', font:{{size:11}} }} }}, tooltip:{{ callbacks:{{ label: ctx => ' '+ctx.formattedValue }} }} }}, scales: type==='bar'?{{ x:{{ ticks:{{ color:'#7a6e58',font:{{size:11}} }}, grid:{{ color:'#1a1508' }} }}, y:{{ ticks:{{ color:'#7a6e58',font:{{size:11}} }}, grid:{{ color:'#2a2418' }} }} }}:undefined, ...opts }}
+      options: {{ responsive:true, plugins:{{ legend:{{ display: type!=='bar', labels:{{ color:'#94a3b8', font:{{size:11}} }} }}, tooltip:{{ callbacks:{{ label: ctx => ' '+ctx.formattedValue }} }} }}, scales: type==='bar'?{{ x:{{ ticks:{{ color:'#94a3b8',font:{{size:11}} }}, grid:{{ color:'#1e293b' }} }}, y:{{ ticks:{{ color:'#94a3b8',font:{{size:11}} }}, grid:{{ color:'#334155' }} }} }}:undefined, ...opts }}
     }});
   }}
 
@@ -1175,23 +1431,24 @@ function num(v) {{ return (v == null || isNaN(v)) ? '-' : Number(v).toLocaleStri
 
   // Etapa
   const etKeys = Object.keys(k.por_etapa).sort((a,b)=>k.por_etapa[b]-k.por_etapa[a]);
-  mkChart('chart-etapa','bar',etKeys,etKeys.map(e=>k.por_etapa[e]),Array(etKeys.length).fill('#C9A84C'));
+  mkChart('chart-etapa','bar',etKeys,etKeys.map(e=>k.por_etapa[e]),Array(etKeys.length).fill('#6366f1'));
 
   // Clientes
   const clKeys = Object.keys(k.por_cliente).slice(0,10);
-  mkChart('chart-clientes','bar',clKeys,clKeys.map(c=>k.por_cliente[c]),Array(clKeys.length).fill('#C9A84C'));
+  mkChart('chart-clientes','bar',clKeys,clKeys.map(c=>k.por_cliente[c]),Array(clKeys.length).fill('#3b82f6'));
 
   // Empresa
   const empKeys = Object.keys(k.por_empresa);
-  mkChart('chart-empresa','doughnut',empKeys,empKeys.map(e=>k.por_empresa[e]),['#C9A84C','#E8D4A0','#8B6914','#f0ead8']);
+  const empCols = empKeys.map(e => e.toLowerCase().includes('vitta') ? '#C9A84C' : e.toLowerCase().includes('eco') ? '#2d6a4f' : '#7a6e58');
+  mkChart('chart-empresa','doughnut',empKeys,empKeys.map(e=>k.por_empresa[e]),empCols);
 
   // Gargalos
   const gKeys = Object.keys(k.top_gargalos).slice(0,5);
-  mkChart('chart-gargalos','bar',gKeys.map(g=>g.length>30?g.slice(0,30)+'…':g),gKeys.map(g=>k.top_gargalos[g]),Array(gKeys.length).fill('#f87171'));
+  mkChart('chart-gargalos','bar',gKeys.map(g=>g.length>30?g.slice(0,30)+'…':g),gKeys.map(g=>k.top_gargalos[g]),Array(gKeys.length).fill('#ef4444'));
 
   // Vendedor
   const vKeys = Object.keys(k.por_vendedor).sort((a,b)=>k.por_vendedor[b]-k.por_vendedor[a]);
-  mkChart('chart-vendedor','bar',vKeys,vKeys.map(v=>k.por_vendedor[v]),Array(vKeys.length).fill('#C9A84C'));
+  mkChart('chart-vendedor','bar',vKeys,vKeys.map(v=>k.por_vendedor[v]),Array(vKeys.length).fill('#f59e0b'));
 }})();
 
 // ─── PAGE 2: PEDIDOS — lista agrupada por pedido ─────────────────────────────
@@ -1200,7 +1457,7 @@ const allPedidos = PEDIDOS;
 function filterPedidos() {{
   const q   = (document.getElementById('search-pedidos')?.value||'').toLowerCase();
   const st  = document.getElementById('filter-status').value;
-  const emp = document.getElementById('filter-empresa').value;
+  const emp = getEmpFilter('emp-filter-pedidos');
   const vnd = document.getElementById('filter-vendedor').value;
   const pri = document.getElementById('filter-prioridade').value;
   const filtered = allPedidos.filter(r =>
@@ -1213,10 +1470,17 @@ function filterPedidos() {{
   renderPedidosGrouped(filtered);
 }}
 
+function parseDate(d) {{
+  if (!d) return 0;
+  const p = d.split('/');
+  return p.length === 3 ? new Date(+p[2], +p[1]-1, +p[0]).getTime() : 0;
+}}
+
 function renderPedidosGrouped(data) {{
-  // agrupar por pedido preservando ordem de prioridade → data → pedido
+  // agrupar por pedido ordenando por data de criação (mais antigo primeiro)
   const ordered = [...data].sort((a,b) => {{
-    if (a.prioridade !== b.prioridade) return a.prioridade - b.prioridade;
+    const da = parseDate(a.data), db = parseDate(b.data);
+    if (da !== db) return da - db;
     return (a.pedido||'').localeCompare(b.pedido||'');
   }});
   const groups = {{}};
@@ -1239,7 +1503,8 @@ function renderPedidosGrouped(data) {{
     const pbarC      = pctGeral>=100?'#22c55e':pctGeral>=50?'#f59e0b':'#ef4444';
     // linha de cabeçalho do pedido
     html += `<tr class="grp-hdr"><td colspan="9">
-      <span style="color:var(--gold);font-size:12px;margin-right:10px">${{pedKey}}</span>
+      ${{empBadge(first.empresa)}}
+      <span style="color:#93c5fd;font-size:12px;margin:0 10px 0 8px">${{pedKey}}</span>
       <span style="margin-right:16px">${{first.cliente||''}}</span>
       <span style="color:var(--muted);font-weight:400;margin-right:16px">${{first.vendedor||''}}</span>
       <span style="color:var(--muted);font-weight:400;margin-right:16px">${{first.data||''}}</span>
@@ -1270,19 +1535,54 @@ function renderPedidosGrouped(data) {{
   if(c) c.textContent = totalLinhas + ' produto(s) em ' + gOrder.length + ' pedido(s)';
 }}
 
+// Lista global de empresas
+const ALL_EMPRESAS = [...new Set(PEDIDOS.map(r=>r.empresa).filter(Boolean))].sort();
+
+function empBtnClass(emp) {{
+  const l = emp.toLowerCase();
+  return l.includes('vitta') ? 'emp-btn emp-btn-vg' : l.includes('eco') ? 'emp-btn emp-btn-eco' : 'emp-btn';
+}}
+function empBtnLabel(emp) {{
+  const l = emp.toLowerCase();
+  return l.includes('vitta') ? 'VG' : l.includes('eco') ? 'ECO' : emp.slice(0,4).toUpperCase();
+}}
+
+function buildEmpButtons(groupId, onToggle) {{
+  const el = document.getElementById(groupId);
+  if (!el) return;
+  el.innerHTML = ALL_EMPRESAS.map(e =>
+    `<button class="${{empBtnClass(e)}}" data-emp="${{e}}" onclick="toggleEmpBtn('${{groupId}}','${{e}}',this,${{onToggle}})">${{empBtnLabel(e)}}</button>`
+  ).join('');
+}}
+
+function toggleEmpBtn(groupId, emp, btn, onToggle) {{
+  const wasActive = btn.classList.contains('active');
+  // desativa todos do grupo
+  document.querySelectorAll(`#${{groupId}} .emp-btn`).forEach(b => b.classList.remove('active'));
+  // ativa o clicado (toggle: se já estava ativo, desativa)
+  if (!wasActive) btn.classList.add('active');
+  onToggle();
+}}
+
+function getEmpFilter(groupId) {{
+  const active = document.querySelector(`#${{groupId}} .emp-btn.active`);
+  return active ? active.dataset.emp : '';
+}}
+
 function initPedidos() {{
-  const empresas = [...new Set(allPedidos.map(r=>r.empresa).filter(Boolean))];
+  buildEmpButtons('emp-filter-pedidos', filterPedidos);
   const vendedores = [...new Set(allPedidos.map(r=>r.vendedor).filter(Boolean))];
-  document.getElementById('filter-empresa').innerHTML += empresas.map(e=>`<option>${{e}}</option>`).join('');
   document.getElementById('filter-vendedor').innerHTML += vendedores.map(v=>`<option>${{v}}</option>`).join('');
   renderPedidosGrouped(allPedidos);
 }}
 
 // ─── PAGE 3: ALOCAÇÃO — lista agrupada por produto ───────────────────────────
 function filterAlocacao() {{
-  const q = (document.getElementById('search-alocacao')?.value||'').toLowerCase();
+  const q   = (document.getElementById('search-alocacao')?.value||'').toLowerCase();
+  const emp = getEmpFilter('emp-filter-alocacao');
   const filtered = (ALOCACAO||[]).filter(r =>
-    !q || [r.produto,r.cliente,r.pedido].join(' ').toLowerCase().includes(q)
+    (!q || [r.produto,r.cliente,r.pedido].join(' ').toLowerCase().includes(q)) &&
+    (!emp || r.empresa === emp)
   );
   renderAlocacaoGrouped(filtered);
 }}
@@ -1307,7 +1607,8 @@ function renderAlocacaoGrouped(data) {{
     const saldo = rows[0].saldo_disponivel;
     const totalDemanda = rows.reduce((s,r)=>s+(r.qtde_pedido||0),0);
     html += `<tr class="grp-hdr"><td colspan="11">
-      <span style="color:var(--gold);font-size:12px;margin-right:10px">${{prod}}</span>
+      ${{empBadge(rows[0].empresa)}}
+      <span style="color:#93c5fd;font-size:12px;margin:0 10px 0 8px">${{prod}}</span>
       <span style="color:var(--muted);font-weight:400;margin-right:16px">Saldo disponível: <strong style="color:#f1f5f9">${{num(saldo)}}</strong></span>
       <span style="color:var(--muted);font-weight:400;margin-right:16px">Demanda total: <strong style="color:${{totalDemanda>saldo?'#ef4444':'#22c55e'}}">${{num(totalDemanda)}}</strong></span>
       <span style="color:var(--muted);font-weight:400">${{rows.length}} pedido(s) disputando este SKU</span>
@@ -1333,6 +1634,7 @@ function renderAlocacaoGrouped(data) {{
 }}
 
 function initAlocacao() {{
+  buildEmpButtons('emp-filter-alocacao', filterAlocacao);
   renderAlocacaoGrouped(ALOCACAO||[]);
 }}
 
@@ -1345,9 +1647,11 @@ const GARGALO_COLORS = {{
 const GARGALO_ORDER = ['Compra necessária','Envase pendente','Pintura pendente','Entrada prevista','Verificar dados','OK - Produto acabado'];
 
 function filterGargalos() {{
-  const q = (document.getElementById('search-gargalos')?.value||'').toLowerCase();
+  const q   = (document.getElementById('search-gargalos')?.value||'').toLowerCase();
+  const emp = getEmpFilter('emp-filter-gargalos');
   const filtered = GARGALOS.filter(r =>
-    !q || [r.descricao,r.marca,r.status_gargalo].join(' ').toLowerCase().includes(q)
+    (!q || [r.descricao,r.marca,r.status_gargalo].join(' ').toLowerCase().includes(q)) &&
+    (!emp || r.empresa === emp)
   );
   renderGargalosGrouped(filtered);
 }}
@@ -1376,7 +1680,7 @@ function renderGargalosGrouped(data) {{
     rows.forEach(r => {{
       html += `<tr>
         <td title="${{r.descricao}}">${{r.descricao||'-'}}</td>
-        <td>${{r.marca||'-'}}</td>
+        <td>${{empBadge(r.empresa)}} ${{r.marca||'-'}}</td>
         <td style="text-align:right">${{num(r.demanda_total)}}</td>
         <td style="text-align:right;color:${{r.saldo_atual<0?'#ef4444':'inherit'}}">${{num(r.saldo_atual)}}</td>
         <td style="text-align:right">${{num(r.estoque_futuro)}}</td>
@@ -1401,6 +1705,7 @@ function renderGargalosGrouped(data) {{
 }}
 
 function initGargalos() {{
+  buildEmpButtons('emp-filter-gargalos', filterGargalos);
   renderGargalosGrouped(GARGALOS);
 }}
 
@@ -1421,10 +1726,12 @@ const COL_LABELS = {{
   demanda_total_sku:'Demanda Total SKU'
 }};
 
-function initPlano() {{
+function renderPlano(empFilter) {{
   const container = document.getElementById('plano-container');
+  container.innerHTML = '';
   PLANO_SECTIONS.forEach(sec => {{
-    const items = PLANO[sec.key] || [];
+    let items = (PLANO[sec.key] || []);
+    if (empFilter) items = items.filter(r => r.empresa === empFilter);
     if (items.length === 0) return;
     let html = `<div class="plano-section">
       <h3 style="background:${{sec.color}}22;color:${{sec.color}};border:1px solid ${{sec.color}}44">
@@ -1432,10 +1739,10 @@ function initPlano() {{
       </h3>
       <div style="overflow:auto;background:var(--surface);border:1px solid var(--border);border-top:none;border-radius:0 0 6px 6px">
       <table class="plano-table">
-        <thead><tr>${{sec.cols.map(c=>`<th>${{COL_LABELS[c]||c}}</th>`).join('')}}</tr></thead>
+        <thead><tr>${{sec.cols.filter(c=>c!=='empresa').map(c=>`<th>${{COL_LABELS[c]||c}}</th>`).join('')}}</tr></thead>
         <tbody>`;
     items.forEach(r => {{
-      html += `<tr>${{sec.cols.map(c => {{
+      html += `<tr>${{sec.cols.filter(c=>c!=='empresa').map(c => {{
         const v = r[c];
         if (c==='descricao') return `<td title="${{v}}">${{v?.length>40?v.slice(0,40)+'…':v||'-'}}</td>`;
         if (typeof v === 'number') return `<td style="text-align:right">${{num(v)}}</td>`;
@@ -1445,6 +1752,15 @@ function initPlano() {{
     html += `</tbody></table></div></div>`;
     container.innerHTML += html;
   }});
+}}
+
+function filterPlano() {{
+  renderPlano(getEmpFilter('emp-filter-plano'));
+}}
+
+function initPlano() {{
+  buildEmpButtons('emp-filter-plano', filterPlano);
+  renderPlano('');
 }}
 
 // ─── PAGE 6: DIAGNÓSTICO ─────────────────────────────────────────────────────
@@ -1473,6 +1789,151 @@ function initDiagnostico() {{
   }});
 }}
 
+// ─── PAGE 7: ESTOQUE VTG ─────────────────────────────────────────────────────
+const MARCA_CORES = {{
+  'AMAZONPLEX':              '#06b6d4',
+  'BABOSA LISS':             '#22c55e',
+  'BYO':                     '#15803d',
+  'COCONUT LISS':            '#3b82f6',
+  'DUOTOX':                  '#ef4444',
+  'MIX BRASIL 7 OILS':       '#f97316',
+  'MOUSSE LISS':             '#ec4899',
+  'NANOPLEX ARGININA':       '#a78bfa',
+  'NANOPLEX ARGININA SOLAR': '#fbbf24',
+  'SILK EXPRESS':            '#9f1239',
+  'TOP ONE':                 '#f472b6',
+  'VITTA BLONDE':            '#C9A84C',
+  'VITTABLOND':              '#E8D4A0',
+  'WAVESSENCE':              '#C9A84C',
+}};
+function getMarcaColor(marca) {{
+  if (!marca) return '#64748b';
+  return MARCA_CORES[marca.toUpperCase()] || MARCA_CORES[marca] || '#64748b';
+}}
+
+const vtgOpen = {{}};
+
+function toggleMarca(key) {{
+  vtgOpen[key] = !vtgOpen[key];
+  const show = vtgOpen[key];
+  document.querySelectorAll('.vtg-g-' + key).forEach(el => {{
+    el.style.display = show ? '' : 'none';
+  }});
+  const icon = document.getElementById('vtg-ic-' + key);
+  if (icon) icon.textContent = show ? '▼' : '▶';
+}}
+
+function vtgExpandAll(open) {{
+  Object.keys(vtgOpen).forEach(k => {{ vtgOpen[k] = open; }});
+  document.querySelectorAll('[class*="vtg-g-"]').forEach(el => {{
+    el.style.display = open ? '' : 'none';
+  }});
+  document.querySelectorAll('[id^="vtg-ic-"]').forEach(el => {{
+    el.textContent = open ? '▼' : '▶';
+  }});
+}}
+
+function saldoCell(v) {{
+  const n = Number(v)||0;
+  const bg = n > 0 ? 'rgba(34,197,94,.12)' : n < 0 ? 'rgba(239,68,68,.18)' : 'rgba(245,158,11,.18)';
+  const col = n > 0 ? '#22c55e' : n < 0 ? '#ef4444' : '#f59e0b';
+  return `<td style="text-align:right;background:${{bg}};color:${{col}};font-weight:600">${{num(n)}}</td>`;
+}}
+function frascoCell(v) {{
+  const n = Number(v)||0;
+  const bg = n > 0 ? 'rgba(251,146,60,.15)' : '';
+  const col = n > 0 ? '#fb923c' : 'var(--muted)';
+  return `<td style="text-align:right;background:${{bg}};color:${{col}}">${{num(n)}}</td>`;
+}}
+function coberturaCell(v) {{
+  const n = Number(v)||0;
+  const disp = n >= 99 ? '∞' : n.toFixed(1) + 'm';
+  const col  = n < 1 ? '#ef4444' : n < 2 ? '#f97316' : n < 3 ? '#f59e0b' : '#22c55e';
+  const bg   = n < 1 ? 'rgba(239,68,68,.14)' : n < 2 ? 'rgba(249,115,22,.12)' : n < 3 ? 'rgba(245,158,11,.12)' : 'rgba(34,197,94,.1)';
+  return `<td style="text-align:right;background:${{bg}};color:${{col}};font-weight:700">${{disp}}</td>`;
+}}
+
+function renderVtgGrouped(data) {{
+  const marcas = {{}};
+  data.forEach(r => {{
+    const m = r.marca || '(sem marca)';
+    const mo = r.modelo || '(sem modelo)';
+    if (!marcas[m]) marcas[m] = {{}};
+    if (!marcas[m][mo]) marcas[m][mo] = [];
+    marcas[m][mo].push(r);
+  }});
+
+  let html = '';
+  let total = 0;
+  Object.keys(marcas).sort().forEach(marca => {{
+    const modelos = marcas[marca];
+    const allRows = Object.values(modelos).flat();
+    const tSaldo  = allRows.reduce((s,r)=>s+(r.saldo_atual||0),0);
+    const tFuturo = allRows.reduce((s,r)=>s+(r.estoque_futuro||0),0);
+    total += allRows.length;
+
+    const cor = getMarcaColor(marca);
+    const key = marca.replace(/[^a-zA-Z0-9]/g,'_');
+    if (vtgOpen[key] === undefined) vtgOpen[key] = false;
+    const isOpen = vtgOpen[key];
+
+    // Totais de cobertura ponderada pela média
+    const tMedia = allRows.reduce((s,r)=>s+(r.media_6m||0),0);
+    const cobMedia = tMedia>0 ? (tSaldo/tMedia).toFixed(1)+'m' : '–';
+
+    // Cabeçalho clicável da marca
+    html += `<tr class="grp-hdr vtg-marca-hdr" onclick="toggleMarca('${{key}}')" style="cursor:pointer;">
+      <td colspan="10" style="border-left:4px solid ${{cor}};">
+        <span id="vtg-ic-${{key}}" style="color:${{cor}};font-size:10px;margin-right:8px;font-weight:700">${{isOpen?'▼':'▶'}}</span>
+        <strong style="color:${{cor}}">${{marca}}</strong>
+        <span style="color:var(--muted);font-weight:400;font-size:11px;margin-left:12px">${{allRows.length}} produto(s)</span>
+        <span style="color:var(--muted);font-weight:400;font-size:11px;margin-left:12px">Saldo: <strong style="color:${{tSaldo>0?'var(--green)':tSaldo<0?'var(--red)':'var(--yellow)'}}">${{num(tSaldo)}}</strong></span>
+        <span style="color:var(--muted);font-weight:400;font-size:11px;margin-left:12px">Est. futuro: <strong style="color:${{tFuturo>0?'var(--green)':tFuturo<0?'var(--red)':'var(--yellow)'}}">${{num(tFuturo)}}</strong></span>
+        <span style="color:var(--muted);font-weight:400;font-size:11px;margin-left:12px">Cobertura média: <strong style="color:var(--muted)">${{cobMedia}}</strong></span>
+      </td>
+    </tr>`;
+
+    Object.keys(modelos).sort().forEach(modelo => {{
+      const rows = modelos[modelo];
+      html += `<tr class="vtg-g-${{key}}" style="display:${{isOpen?'':'none'}}">
+        <td colspan="10" style="background:var(--surface2);padding:6px 10px 6px 28px;font-size:11px;color:${{cor}};opacity:.65;font-weight:500;letter-spacing:.3px;border-bottom:1px solid var(--border)">
+          — ${{modelo}}
+        </td>
+      </tr>`;
+      rows.forEach(r => {{
+        html += `<tr class="vtg-g-${{key}}" style="display:${{isOpen?'':'none'}}">
+          <td style="padding-left:36px">${{r.descricao||'-'}}</td>
+          ${{saldoCell(r.saldo_atual)}}
+          <td style="text-align:right;color:${{(r.pend_saida||0)>0?'var(--orange)':'var(--muted)'}}">${{num(r.pend_saida||0)}}</td>
+          <td style="text-align:right;color:${{(r.pend_entrada||0)>0?'var(--blue)':'var(--muted)'}}">${{num(r.pend_entrada||0)}}</td>
+          ${{saldoCell(r.estoque_futuro)}}
+          ${{frascoCell(r.qtde_pintados)}}
+          ${{frascoCell(r.qtde_frascos)}}
+          <td style="text-align:right;color:var(--muted)">${{num(r.media_6m||0)}}</td>
+          <td style="text-align:right;color:${{(r.pico_12m||0)>0?'#a78bfa':'var(--muted)'}};font-weight:${{(r.pico_12m||0)>0?600:400}}">${{num(r.pico_12m||0)}}</td>
+          ${{coberturaCell(r.cobertura)}}
+        </tr>`;
+      }});
+    }});
+  }});
+
+  document.getElementById('tbody-vtg').innerHTML = html || '<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:20px">Nenhum produto encontrado.</td></tr>';
+  const c = document.getElementById('count-vtg');
+  if (c) c.textContent = total + ' produto(s)';
+}}
+
+function filterVtg() {{
+  const q = (document.getElementById('search-vtg')?.value||'').toLowerCase();
+  const filtered = (ESTOQUE_VTG||[]).filter(r =>
+    !q || [r.descricao, r.marca, r.modelo].join(' ').toLowerCase().includes(q)
+  );
+  renderVtgGrouped(filtered);
+}}
+
+function initEstoqueVtg() {{
+  renderVtgGrouped(ESTOQUE_VTG||[]);
+}}
+
 // Init first page
 tablesInit['executivo'] = true;
 
@@ -1498,8 +1959,12 @@ def main():
         df_ped_raw, df_est_raw = carregar_do_sheets()
         pedidos = carregar_pedidos(df_raw=df_ped_raw)
         estoque = carregar_estoque(df_raw=df_est_raw)
+        print("Carregando histórico de vendas mensais...")
+        vendas_dict = carregar_vendas_mensais()
     else:
         print("Usando arquivos locais...")
+        df_est_raw = None
+        vendas_dict = {}
         pedidos = carregar_pedidos()
         estoque = carregar_estoque()
 
@@ -1511,8 +1976,9 @@ def main():
     plano_acao = calcular_plano_acao(df_merged)
     diagnostico = calcular_diagnostico(pedidos, sem_match, df_merged)
     kpis = calcular_kpis(df_merged)
+    estoque_vtg = calcular_estoque_vtg(df_est_raw if FONTE == "sheets" else None, vendas_dict)
 
-    gerar_html(kpis, df_merged, df_alocacao, df_gargalos, plano_acao, diagnostico)
+    gerar_html(kpis, df_merged, df_alocacao, df_gargalos, plano_acao, diagnostico, estoque_vtg)
 
     print("\nDashboard gerado com sucesso!")
     print(f"  Arquivo: {OUTPUT_HTML}")
