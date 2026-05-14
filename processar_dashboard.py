@@ -1235,6 +1235,8 @@ def gerar_html(kpis, df_merged, df_alocacao, df_gargalos, plano_acao, diagnostic
       <option value="4">P4 – Produção</option>
       <option value="5">P5 – Comprar</option>
     </select>
+    <button class="vtg-toggle-btn" onclick="pedidosExpandAll(true)">▼ Expandir Tudo</button>
+    <button class="vtg-toggle-btn" onclick="pedidosExpandAll(false)">▶ Recolher Tudo</button>
     <span class="list-count" id="count-pedidos"></span>
   </div>
   <div class="table-container" style="overflow:auto;max-height:80vh;">
@@ -1260,6 +1262,8 @@ def gerar_html(kpis, df_merged, df_alocacao, df_gargalos, plano_acao, diagnostic
   <div class="filter-bar">
     <input class="search-box" id="search-alocacao" placeholder="Buscar produto ou cliente..." oninput="filterAlocacao()">
     <div id="emp-filter-alocacao" class="emp-filter-group"></div>
+    <button class="vtg-toggle-btn" onclick="alocExpandAll(true)">▼ Expandir Tudo</button>
+    <button class="vtg-toggle-btn" onclick="alocExpandAll(false)">▶ Recolher Tudo</button>
     <span class="list-count" id="count-alocacao"></span>
   </div>
   <div class="table-container" style="overflow:auto;max-height:80vh;">
@@ -1453,6 +1457,19 @@ function empBadge(emp) {{
 
 // ─── PAGE 2: PEDIDOS — lista agrupada por pedido ─────────────────────────────
 const allPedidos = PEDIDOS;
+const pedidosOpen = {{}};
+function togglePedido(key) {{
+  pedidosOpen[key] = !pedidosOpen[key];
+  const show = pedidosOpen[key];
+  document.querySelectorAll('.ped-g-' + key).forEach(el => {{ el.style.display = show ? '' : 'none'; }});
+  const icon = document.getElementById('ped-ic-' + key);
+  if (icon) icon.textContent = show ? '▼' : '▶';
+}}
+function pedidosExpandAll(open) {{
+  Object.keys(pedidosOpen).forEach(k => {{ pedidosOpen[k] = open; }});
+  document.querySelectorAll('[class*="ped-g-"]').forEach(el => {{ el.style.display = open ? '' : 'none'; }});
+  document.querySelectorAll('[id^="ped-ic-"]').forEach(el => {{ el.textContent = open ? '▼' : '▶'; }});
+}}
 
 function filterPedidos() {{
   const q   = (document.getElementById('search-pedidos')?.value||'').toLowerCase();
@@ -1501,8 +1518,12 @@ function renderPedidosGrouped(data) {{
     const totalFalt  = rows.reduce((s,r)=>s+(r.qtde_faltante||0),0);
     const pctGeral   = totalQtde>0?Math.round(totalPoss/totalQtde*100):0;
     const pbarC      = pctGeral>=100?'#22c55e':pctGeral>=50?'#f59e0b':'#ef4444';
-    // linha de cabeçalho do pedido
-    html += `<tr class="grp-hdr"><td colspan="9">
+    const key = pedKey.replace(/[^a-zA-Z0-9]/g,'_');
+    if (pedidosOpen[key] === undefined) pedidosOpen[key] = true;
+    const isOpen = pedidosOpen[key];
+
+    html += `<tr class="grp-hdr" onclick="togglePedido('${{key}}')" style="cursor:pointer;"><td colspan="9">
+      <span id="ped-ic-${{key}}" style="font-size:10px;margin-right:8px;color:#93c5fd;font-weight:700">${{isOpen?'▼':'▶'}}</span>
       ${{empBadge(first.empresa)}}
       <span style="color:#93c5fd;font-size:12px;margin:0 10px 0 8px">${{pedKey}}</span>
       <span style="margin-right:16px">${{first.cliente||''}}</span>
@@ -1511,11 +1532,10 @@ function renderPedidosGrouped(data) {{
       <span style="color:var(--muted);font-weight:400;margin-right:16px">Etapa: ${{first.etapa||'-'}}</span>
       <span style="margin-right:16px">${{rows.length}} produto(s)</span>
       <span style="color:${{pbarC}};margin-right:6px">${{pctGeral}}% atendido</span>
-      <span style="font-size:11px;color:var(--muted)">Total pedido: ${{num(totalQtde)}} | Possível: ${{num(totalPoss)}} | Falta: ${{num(totalFalt)}}</span>
+      <span style="font-size:11px;color:var(--muted)">Total: ${{num(totalQtde)}} | Possível: ${{num(totalPoss)}} | Falta: ${{num(totalFalt)}}</span>
     </td></tr>`;
-    // linhas de produto
     rows.forEach((r, i) => {{
-      html += `<tr>
+      html += `<tr class="ped-g-${{key}}" style="display:${{isOpen?'':'none'}}">
         <td style="text-align:center;color:var(--muted);font-size:11px">${{i+1}}</td>
         <td title="${{r.descricao}}">${{r.descricao||'-'}}</td>
         <td style="text-align:right">${{num(r.qtde_pedido)}}</td>
@@ -1584,6 +1604,11 @@ function toggleAlocacao(key) {{
   document.querySelectorAll('.aloc-g-' + key).forEach(el => {{ el.style.display = show ? '' : 'none'; }});
   const icon = document.getElementById('aloc-ic-' + key);
   if (icon) icon.textContent = show ? '▼' : '▶';
+}}
+function alocExpandAll(open) {{
+  Object.keys(alocOpen).forEach(k => {{ alocOpen[k] = open; }});
+  document.querySelectorAll('[class*="aloc-g-"]').forEach(el => {{ el.style.display = open ? '' : 'none'; }});
+  document.querySelectorAll('[id^="aloc-ic-"]').forEach(el => {{ el.textContent = open ? '▼' : '▶'; }});
 }}
 
 function filterAlocacao() {{
