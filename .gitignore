@@ -1,0 +1,20 @@
+# Credencial Google — NUNCA commitar este arquivo
+credenciais_sheets.json
+
+# Arquivos locais de dados (ficam só na máquina)
+*.csv
+*.xlsx
+*.xls
+
+# Dashboard local (a versão publicada fica em docs/)
+DASHBOARD_PEDIDOS_ESTOQUE.html
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# Windows
+Thumbs.db
+desktop.ini
