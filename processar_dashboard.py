@@ -810,102 +810,171 @@ def gerar_html(kpis, df_merged, df_alocacao, df_gargalos, plano_acao, diagnostic
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Dashboard – Pedidos & Estoque</title>
+<title>Vitta Gold – Planejamento de Pedidos & Estoque</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600;700&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-<link rel="stylesheet" href="https://cdn.datatables.net/1.13.7/css/jquery.dataTables.min.css">
 <script src="https://code.jquery.com/jquery-3.7.0.min.js"></script>
-<script src="https://cdn.datatables.net/1.13.7/js/jquery.dataTables.min.js"></script>
 <style>
   :root{{
-    --bg:#0f172a; --surface:#1e293b; --border:#334155; --text:#f1f5f9;
-    --muted:#94a3b8; --green:#22c55e; --yellow:#f59e0b; --red:#ef4444;
-    --orange:#f97316; --purple:#8b5cf6; --gray:#6b7280; --blue:#3b82f6;
-    --indigo:#6366f1;
+    --bg:#080704;
+    --surface:#100f0a;
+    --surface2:#171510;
+    --border:#2a2418;
+    --border-gold:#C9A84C44;
+    --text:#f0ead8;
+    --muted:#7a6e58;
+    --gold:#C9A84C;
+    --gold-light:#E8D4A0;
+    --gold-dark:#8B6914;
+    --gold-dim:#C9A84C22;
+    --green:#4ade80;
+    --yellow:#fbbf24;
+    --red:#f87171;
+    --orange:#fb923c;
+    --purple:#a78bfa;
+    --gray:#6b7280;
+    --blue:#60a5fa;
   }}
   *{{box-sizing:border-box;margin:0;padding:0;}}
-  body{{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,sans-serif;font-size:14px;}}
-  header{{background:var(--surface);border-bottom:1px solid var(--border);padding:16px 24px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100;}}
-  header h1{{font-size:18px;font-weight:700;color:#fff;}}
-  header span{{font-size:12px;color:var(--muted);}}
-  nav{{display:flex;gap:4px;background:var(--surface);padding:8px 24px;border-bottom:1px solid var(--border);flex-wrap:wrap;}}
-  nav button{{background:transparent;border:1px solid var(--border);color:var(--muted);padding:6px 14px;border-radius:6px;cursor:pointer;font-size:13px;transition:all .15s;}}
-  nav button.active,nav button:hover{{background:var(--indigo);border-color:var(--indigo);color:#fff;}}
-  .page{{display:none;padding:20px 24px;}}
+  body{{background:var(--bg);color:var(--text);font-family:'Inter',system-ui,sans-serif;font-size:14px;}}
+
+  /* ── HEADER ── */
+  header{{
+    background:var(--surface);
+    border-bottom:1px solid var(--border-gold);
+    padding:0 28px;
+    display:flex;align-items:center;justify-content:space-between;
+    position:sticky;top:0;z-index:100;
+    height:60px;
+  }}
+  .header-brand{{display:flex;align-items:center;gap:14px;}}
+  .header-logo{{
+    font-family:'Playfair Display',serif;
+    font-size:20px;font-weight:700;
+    background:linear-gradient(135deg,#E8D4A0,#C9A84C,#8B6914);
+    -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+    background-clip:text;letter-spacing:1px;
+  }}
+  .header-divider{{width:1px;height:28px;background:var(--border-gold);}}
+  .header-sub{{font-size:12px;color:var(--muted);font-weight:300;letter-spacing:.5px;}}
+  header .header-date{{font-size:11px;color:var(--muted);}}
+
+  /* ── NAV ── */
+  nav{{display:flex;gap:4px;background:var(--surface);padding:8px 28px;border-bottom:1px solid var(--border);flex-wrap:wrap;}}
+  nav button{{
+    background:transparent;border:1px solid var(--border);color:var(--muted);
+    padding:5px 14px;border-radius:4px;cursor:pointer;font-size:12px;
+    font-family:'Inter',sans-serif;font-weight:500;letter-spacing:.3px;
+    transition:all .2s;
+  }}
+  nav button:hover{{border-color:var(--gold-dark);color:var(--gold-light);}}
+  nav button.active{{
+    background:linear-gradient(135deg,#1a1508,#2a1f08);
+    border-color:var(--gold);color:var(--gold);
+    box-shadow:0 0 12px var(--gold-dim);
+  }}
+
+  .page{{display:none;padding:20px 28px;}}
   .page.active{{display:block;}}
-  /* KPI CARDS */
-  .kpi-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px;margin-bottom:20px;}}
-  .kpi-card{{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 16px;}}
-  .kpi-card .label{{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;}}
-  .kpi-card .value{{font-size:26px;font-weight:700;}}
-  .kpi-card .sub{{font-size:11px;color:var(--muted);margin-top:2px;}}
+
+  /* ── KPI CARDS ── */
+  .kpi-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(165px,1fr));gap:12px;margin-bottom:22px;}}
+  .kpi-card{{
+    background:var(--surface);border:1px solid var(--border);
+    border-radius:8px;padding:14px 16px;
+    border-top:2px solid var(--border-gold);
+    transition:border-color .2s;
+  }}
+  .kpi-card:hover{{border-top-color:var(--gold);}}
+  .kpi-card .label{{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;margin-bottom:8px;font-weight:500;}}
+  .kpi-card .value{{font-size:28px;font-weight:600;font-family:'Playfair Display',serif;}}
+  .kpi-card .sub{{font-size:11px;color:var(--muted);margin-top:4px;}}
+  .kpi-gold .value{{color:var(--gold);}}
   .kpi-green .value{{color:var(--green);}}
   .kpi-yellow .value{{color:var(--yellow);}}
   .kpi-red .value{{color:var(--red);}}
   .kpi-blue .value{{color:var(--blue);}}
   .kpi-orange .value{{color:var(--orange);}}
   .kpi-purple .value{{color:var(--purple);}}
-  /* CHARTS */
+
+  /* ── CHARTS ── */
   .charts-row{{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:16px;margin-bottom:20px;}}
-  .chart-box{{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px;}}
-  .chart-box h3{{font-size:13px;color:var(--muted);margin-bottom:12px;}}
+  .chart-box{{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:18px;}}
+  .chart-box h3{{font-size:11px;color:var(--muted);margin-bottom:14px;text-transform:uppercase;letter-spacing:.8px;font-weight:500;}}
   .chart-box canvas{{max-height:220px;}}
-  /* TABLES */
-  .table-container{{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px;overflow:auto;}}
-  .table-container h2{{font-size:15px;font-weight:600;margin-bottom:12px;}}
-  table.dataTable{{width:100%!important;border-collapse:collapse;font-size:13px;}}
-  table.dataTable thead th{{background:var(--bg);color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.4px;padding:8px 10px;border-bottom:1px solid var(--border);white-space:nowrap;}}
-  table.dataTable tbody td{{padding:7px 10px;border-bottom:1px solid var(--border);vertical-align:middle;}}
-  table.dataTable tbody tr:hover td{{background:rgba(255,255,255,.03);}}
-  .dataTables_wrapper .dataTables_filter input{{background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:4px 8px;}}
-  .dataTables_wrapper .dataTables_length select{{background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:2px 4px;}}
-  .dataTables_wrapper .dataTables_info,.dataTables_wrapper .dataTables_paginate{{color:var(--muted);font-size:12px;margin-top:8px;}}
-  .dataTables_wrapper .paginate_button{{color:var(--muted)!important;padding:2px 8px!important;border-radius:4px!important;}}
-  .dataTables_wrapper .paginate_button.current{{background:var(--indigo)!important;color:#fff!important;border:none!important;}}
-  /* STATUS BADGES */
-  .badge{{display:inline-block;padding:2px 8px;border-radius:100px;font-size:11px;font-weight:600;white-space:nowrap;}}
-  /* PLANO DE AÇÃO */
-  .plano-section{{margin-bottom:16px;}}
-  .plano-section h3{{font-size:13px;font-weight:700;padding:8px 12px;border-radius:6px 6px 0 0;}}
-  .plano-table{{width:100%;border-collapse:collapse;}}
-  .plano-table td,.plano-table th{{padding:6px 10px;border-bottom:1px solid var(--border);font-size:13px;}}
-  .plano-table th{{font-size:11px;color:var(--muted);font-weight:600;}}
-  /* SECTION TITLES */
-  .section-title{{font-size:16px;font-weight:700;margin-bottom:14px;color:#fff;}}
-  /* FILTER BAR */
-  .filter-bar{{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;}}
-  .filter-bar select,.filter-bar input{{background:var(--surface);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 10px;font-size:13px;}}
-  /* DIAG ISSUES */
-  .issue-card{{background:var(--surface);border-left:3px solid var(--red);border-radius:0 6px 6px 0;padding:8px 12px;margin-bottom:6px;font-size:13px;}}
-  .issue-card .tipo{{font-size:11px;color:var(--red);font-weight:600;margin-bottom:2px;}}
-  /* PROGRESS BAR */
-  .pbar-wrap{{background:var(--bg);border-radius:4px;height:8px;width:80px;display:inline-block;vertical-align:middle;}}
-  .pbar{{height:8px;border-radius:4px;}}
-  /* GROUPED LIST */
+
+  /* ── TABLES ── */
+  .table-container{{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;overflow:auto;}}
+  .section-title{{
+    font-family:'Playfair Display',serif;
+    font-size:18px;font-weight:600;margin-bottom:16px;
+    color:var(--gold-light);letter-spacing:.5px;
+  }}
+
+  /* ── FILTER BAR ── */
+  .filter-bar{{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;align-items:center;}}
+  .filter-bar select,.filter-bar input,.search-box{{
+    background:var(--surface2);border:1px solid var(--border);
+    color:var(--text);border-radius:4px;padding:6px 10px;font-size:13px;
+    font-family:'Inter',sans-serif;outline:none;
+    transition:border-color .2s;
+  }}
+  .filter-bar select:focus,.search-box:focus{{border-color:var(--gold-dark);}}
+  .search-box{{width:260px;}}
+  .list-count{{font-size:12px;color:var(--muted);margin-left:4px;}}
+
+  /* ── GROUPED TABLE ── */
   .grouped-table{{width:100%;border-collapse:collapse;font-size:13px;}}
-  .grouped-table thead th{{background:var(--bg);color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.4px;padding:8px 10px;border-bottom:2px solid var(--border);white-space:nowrap;position:sticky;top:0;z-index:10;}}
+  .grouped-table thead th{{
+    background:var(--bg);color:var(--muted);font-weight:500;
+    font-size:10px;text-transform:uppercase;letter-spacing:.6px;
+    padding:8px 10px;border-bottom:1px solid var(--border);
+    white-space:nowrap;position:sticky;top:0;z-index:10;
+  }}
   .grouped-table tbody td{{padding:7px 10px;border-bottom:1px solid var(--border);vertical-align:middle;}}
-  .grouped-table tbody tr:hover td{{background:rgba(255,255,255,.03);}}
-  /* GROUP HEADER ROW — linha divisória grossa entre pedidos/produtos */
+  .grouped-table tbody tr:hover td{{background:rgba(201,168,76,.04);}}
+
+  /* ── GROUP HEADER ROW — separador dourado entre pedidos/produtos ── */
   .grouped-table tr.grp-hdr td{{
-    background:#0d1f35;
-    border-top:3px solid #334155;
-    border-bottom:2px solid #334155;
-    font-weight:700;
-    font-size:12px;
-    color:#e2e8f0;
-    padding:9px 10px;
-    letter-spacing:.2px;
+    background:linear-gradient(90deg,#1a1508,#110e05);
+    border-top:2px solid var(--gold-dark);
+    border-bottom:1px solid var(--border-gold);
+    font-weight:600;font-size:12px;color:var(--gold-light);
+    padding:10px 10px;letter-spacing:.2px;
   }}
   .grouped-table tr.grp-hdr:first-of-type td{{border-top:none;}}
-  /* search box */
-  .search-box{{background:var(--surface);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 12px;font-size:13px;width:260px;}}
-  .list-count{{font-size:12px;color:var(--muted);margin-left:8px;}}
+
+  /* ── BADGE ── */
+  .badge{{display:inline-block;padding:2px 8px;border-radius:3px;font-size:11px;font-weight:600;white-space:nowrap;letter-spacing:.2px;}}
+
+  /* ── PROGRESS BAR ── */
+  .pbar-wrap{{background:var(--border);border-radius:2px;height:6px;width:80px;display:inline-block;vertical-align:middle;}}
+  .pbar{{height:6px;border-radius:2px;}}
+
+  /* ── PLANO DE AÇÃO ── */
+  .plano-section{{margin-bottom:16px;}}
+  .plano-section h3{{font-size:12px;font-weight:600;padding:9px 14px;border-radius:4px 4px 0 0;letter-spacing:.3px;}}
+  .plano-table{{width:100%;border-collapse:collapse;}}
+  .plano-table td,.plano-table th{{padding:7px 10px;border-bottom:1px solid var(--border);font-size:13px;}}
+  .plano-table th{{font-size:10px;color:var(--muted);font-weight:500;text-transform:uppercase;letter-spacing:.5px;}}
+
+  /* ── DIAG ── */
+  .issue-card{{background:var(--surface);border-left:2px solid var(--red);border-radius:0 4px 4px 0;padding:8px 12px;margin-bottom:6px;font-size:13px;}}
+  .issue-card .tipo{{font-size:10px;color:var(--red);font-weight:600;margin-bottom:2px;text-transform:uppercase;letter-spacing:.4px;}}
+
+  /* ── GOLD DIVIDER LINE ── */
+  .gold-line{{height:1px;background:linear-gradient(90deg,transparent,var(--gold),transparent);margin:2px 0 18px;opacity:.4;}}
 </style>
 </head>
 <body>
 <header>
-  <h1>📦 Planejamento de Pedidos & Estoque</h1>
-  <span>Gerado em {data_geracao} &nbsp;|&nbsp; Dados: 14/05/2026</span>
+  <div class="header-brand">
+    <span class="header-logo">VITTA GOLD</span>
+    <div class="header-divider"></div>
+    <span class="header-sub">Planejamento de Pedidos &amp; Estoque</span>
+  </div>
+  <span class="header-date">Gerado em {data_geracao}</span>
 </header>
 <nav>
   <button class="active" onclick="showPage('executivo',this)">1 · Visão Executiva</button>
@@ -1094,7 +1163,7 @@ function num(v) {{ return (v == null || isNaN(v)) ? '-' : Number(v).toLocaleStri
     if (!ctx) return;
     new Chart(ctx, {{
       type, data: {{ labels, datasets:[{{ data, backgroundColor: colors, borderColor: type==='bar'?colors:undefined, borderWidth: type==='bar'?0:2 }}] }},
-      options: {{ responsive:true, plugins:{{ legend:{{ display: type!=='bar', labels:{{ color:'#94a3b8', font:{{size:11}} }} }}, tooltip:{{ callbacks:{{ label: ctx => ' '+ctx.formattedValue }} }} }}, scales: type==='bar'?{{ x:{{ ticks:{{ color:'#94a3b8',font:{{size:11}} }}, grid:{{ color:'#1e293b' }} }}, y:{{ ticks:{{ color:'#94a3b8',font:{{size:11}} }}, grid:{{ color:'#334155' }} }} }}:undefined, ...opts }}
+      options: {{ responsive:true, plugins:{{ legend:{{ display: type!=='bar', labels:{{ color:'#7a6e58', font:{{size:11}} }} }}, tooltip:{{ callbacks:{{ label: ctx => ' '+ctx.formattedValue }} }} }}, scales: type==='bar'?{{ x:{{ ticks:{{ color:'#7a6e58',font:{{size:11}} }}, grid:{{ color:'#1a1508' }} }}, y:{{ ticks:{{ color:'#7a6e58',font:{{size:11}} }}, grid:{{ color:'#2a2418' }} }} }}:undefined, ...opts }}
     }});
   }}
 
@@ -1106,23 +1175,23 @@ function num(v) {{ return (v == null || isNaN(v)) ? '-' : Number(v).toLocaleStri
 
   // Etapa
   const etKeys = Object.keys(k.por_etapa).sort((a,b)=>k.por_etapa[b]-k.por_etapa[a]);
-  mkChart('chart-etapa','bar',etKeys,etKeys.map(e=>k.por_etapa[e]),Array(etKeys.length).fill('#6366f1'));
+  mkChart('chart-etapa','bar',etKeys,etKeys.map(e=>k.por_etapa[e]),Array(etKeys.length).fill('#C9A84C'));
 
   // Clientes
   const clKeys = Object.keys(k.por_cliente).slice(0,10);
-  mkChart('chart-clientes','bar',clKeys,clKeys.map(c=>k.por_cliente[c]),Array(clKeys.length).fill('#3b82f6'));
+  mkChart('chart-clientes','bar',clKeys,clKeys.map(c=>k.por_cliente[c]),Array(clKeys.length).fill('#C9A84C'));
 
   // Empresa
   const empKeys = Object.keys(k.por_empresa);
-  mkChart('chart-empresa','doughnut',empKeys,empKeys.map(e=>k.por_empresa[e]),['#22c55e','#6366f1','#f59e0b','#ef4444']);
+  mkChart('chart-empresa','doughnut',empKeys,empKeys.map(e=>k.por_empresa[e]),['#C9A84C','#E8D4A0','#8B6914','#f0ead8']);
 
   // Gargalos
   const gKeys = Object.keys(k.top_gargalos).slice(0,5);
-  mkChart('chart-gargalos','bar',gKeys.map(g=>g.length>30?g.slice(0,30)+'…':g),gKeys.map(g=>k.top_gargalos[g]),Array(gKeys.length).fill('#ef4444'));
+  mkChart('chart-gargalos','bar',gKeys.map(g=>g.length>30?g.slice(0,30)+'…':g),gKeys.map(g=>k.top_gargalos[g]),Array(gKeys.length).fill('#f87171'));
 
   // Vendedor
   const vKeys = Object.keys(k.por_vendedor).sort((a,b)=>k.por_vendedor[b]-k.por_vendedor[a]);
-  mkChart('chart-vendedor','bar',vKeys,vKeys.map(v=>k.por_vendedor[v]),Array(vKeys.length).fill('#f59e0b'));
+  mkChart('chart-vendedor','bar',vKeys,vKeys.map(v=>k.por_vendedor[v]),Array(vKeys.length).fill('#C9A84C'));
 }})();
 
 // ─── PAGE 2: PEDIDOS — lista agrupada por pedido ─────────────────────────────
@@ -1170,7 +1239,7 @@ function renderPedidosGrouped(data) {{
     const pbarC      = pctGeral>=100?'#22c55e':pctGeral>=50?'#f59e0b':'#ef4444';
     // linha de cabeçalho do pedido
     html += `<tr class="grp-hdr"><td colspan="9">
-      <span style="color:#93c5fd;font-size:12px;margin-right:10px">${{pedKey}}</span>
+      <span style="color:var(--gold);font-size:12px;margin-right:10px">${{pedKey}}</span>
       <span style="margin-right:16px">${{first.cliente||''}}</span>
       <span style="color:var(--muted);font-weight:400;margin-right:16px">${{first.vendedor||''}}</span>
       <span style="color:var(--muted);font-weight:400;margin-right:16px">${{first.data||''}}</span>
@@ -1238,7 +1307,7 @@ function renderAlocacaoGrouped(data) {{
     const saldo = rows[0].saldo_disponivel;
     const totalDemanda = rows.reduce((s,r)=>s+(r.qtde_pedido||0),0);
     html += `<tr class="grp-hdr"><td colspan="11">
-      <span style="color:#93c5fd;font-size:12px;margin-right:10px">${{prod}}</span>
+      <span style="color:var(--gold);font-size:12px;margin-right:10px">${{prod}}</span>
       <span style="color:var(--muted);font-weight:400;margin-right:16px">Saldo disponível: <strong style="color:#f1f5f9">${{num(saldo)}}</strong></span>
       <span style="color:var(--muted);font-weight:400;margin-right:16px">Demanda total: <strong style="color:${{totalDemanda>saldo?'#ef4444':'#22c55e'}}">${{num(totalDemanda)}}</strong></span>
       <span style="color:var(--muted);font-weight:400">${{rows.length}} pedido(s) disputando este SKU</span>
