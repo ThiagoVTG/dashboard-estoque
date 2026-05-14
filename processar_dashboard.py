@@ -1577,6 +1577,15 @@ function initPedidos() {{
 }}
 
 // ─── PAGE 3: ALOCAÇÃO — lista agrupada por produto ───────────────────────────
+const alocOpen = {{}};
+function toggleAlocacao(key) {{
+  alocOpen[key] = !alocOpen[key];
+  const show = alocOpen[key];
+  document.querySelectorAll('.aloc-g-' + key).forEach(el => {{ el.style.display = show ? '' : 'none'; }});
+  const icon = document.getElementById('aloc-ic-' + key);
+  if (icon) icon.textContent = show ? '▼' : '▶';
+}}
+
 function filterAlocacao() {{
   const q   = (document.getElementById('search-alocacao')?.value||'').toLowerCase();
   const emp = getEmpFilter('emp-filter-alocacao');
@@ -1606,15 +1615,22 @@ function renderAlocacaoGrouped(data) {{
     const rows = groups[prod];
     const saldo = rows[0].saldo_disponivel;
     const totalDemanda = rows.reduce((s,r)=>s+(r.qtde_pedido||0),0);
-    html += `<tr class="grp-hdr"><td colspan="11">
-      ${{empBadge(rows[0].empresa)}}
-      <span style="color:#93c5fd;font-size:12px;margin:0 10px 0 8px">${{prod}}</span>
-      <span style="color:var(--muted);font-weight:400;margin-right:16px">Saldo disponível: <strong style="color:#f1f5f9">${{num(saldo)}}</strong></span>
-      <span style="color:var(--muted);font-weight:400;margin-right:16px">Demanda total: <strong style="color:${{totalDemanda>saldo?'#ef4444':'#22c55e'}}">${{num(totalDemanda)}}</strong></span>
-      <span style="color:var(--muted);font-weight:400">${{rows.length}} pedido(s) disputando este SKU</span>
-    </td></tr>`;
+    const key = prod.replace(/[^a-zA-Z0-9]/g,'_');
+    if (alocOpen[key] === undefined) alocOpen[key] = true;
+    const isOpen = alocOpen[key];
+
+    html += `<tr class="grp-hdr" onclick="toggleAlocacao('${{key}}')" style="cursor:pointer;">
+      <td colspan="11">
+        <span id="aloc-ic-${{key}}" style="font-size:10px;margin-right:8px;color:#93c5fd;font-weight:700">${{isOpen?'▼':'▶'}}</span>
+        ${{empBadge(rows[0].empresa)}}
+        <span style="color:#93c5fd;font-size:12px;margin:0 10px 0 8px">${{prod}}</span>
+        <span style="color:var(--muted);font-weight:400;margin-right:16px">Saldo disponível: <strong style="color:#f1f5f9">${{num(saldo)}}</strong></span>
+        <span style="color:var(--muted);font-weight:400;margin-right:16px">Demanda total: <strong style="color:${{totalDemanda>saldo?'#ef4444':'#22c55e'}}">${{num(totalDemanda)}}</strong></span>
+        <span style="color:var(--muted);font-weight:400">${{rows.length}} pedido(s) disputando este SKU</span>
+      </td>
+    </tr>`;
     rows.forEach((r, i) => {{
-      html += `<tr>
+      html += `<tr class="aloc-g-${{key}}" style="display:${{isOpen?'':'none'}}">
         <td style="text-align:center;color:var(--muted);font-size:11px">${{i+1}}</td>
         <td>${{r.pedido||'-'}}</td><td>${{r.cliente||'-'}}</td>
         <td>${{r.vendedor||'-'}}</td><td>${{r.data||'-'}}</td>
