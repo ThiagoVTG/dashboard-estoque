@@ -51,6 +51,9 @@ PEDIDOS_CSV      = Path(r"C:\Users\thiag\Downloads\PEDIDOS PENDENTES - 14_05.csv
 ESTOQUE_XLSX     = Path(r"C:\Users\thiag\Downloads\CONTROLE DE INVENTARIO.xlsx")
 ABA_ESTOQUE_XLSX = "ESTOQUE DIA"
 
+# ── Senha de acesso ao dashboard (proteção básica) ───────────────────────────
+SENHA_DASHBOARD = "VTG"
+
 # ── Saída ─────────────────────────────────────────────────────────────────────
 BASE_DIR = Path(__file__).parent
 # Em CI, grava em docs/index.html (servido pelo GitHub Pages)
@@ -1150,6 +1153,49 @@ def gerar_html(kpis, df_merged, df_alocacao, df_gargalos, plano_acao, diagnostic
   /* ── DIVIDER LINE ── */
   .gold-line{{height:1px;background:linear-gradient(90deg,transparent,#334155,transparent);margin:2px 0 18px;opacity:.6;}}
 
+  /* ── LOGIN OVERLAY ── */
+  #login-overlay{{
+    display:none;position:fixed;inset:0;z-index:9999;
+    background:var(--bg);
+    align-items:center;justify-content:center;
+  }}
+  .login-card{{
+    background:var(--surface);border:1px solid var(--border);border-radius:12px;
+    padding:48px 40px;width:340px;text-align:center;
+    box-shadow:0 0 60px rgba(0,0,0,.6);
+  }}
+  .login-logo{{
+    font-size:28px;font-weight:700;letter-spacing:3px;
+    background:linear-gradient(135deg,#E8D4A0,#C9A84C,#8B6914);
+    -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+    background-clip:text;margin-bottom:6px;
+  }}
+  .login-sub{{font-size:11px;color:var(--muted);letter-spacing:.5px;margin-bottom:32px;}}
+  .login-input{{
+    width:100%;background:var(--surface2);border:1px solid var(--border);
+    color:var(--text);border-radius:6px;padding:11px 14px;font-size:15px;
+    font-family:inherit;outline:none;text-align:center;letter-spacing:3px;
+    transition:border-color .2s;
+  }}
+  .login-input:focus{{border-color:var(--gold);}}
+  .login-btn{{
+    width:100%;margin-top:14px;padding:11px;border-radius:6px;
+    background:linear-gradient(135deg,#C9A84C,#8B6914);
+    border:none;color:#0f172a;font-weight:700;font-size:14px;
+    cursor:pointer;font-family:inherit;letter-spacing:.5px;
+    transition:opacity .2s;
+  }}
+  .login-btn:hover{{opacity:.85;}}
+  .login-error{{
+    display:none;color:var(--red);font-size:12px;margin-top:10px;
+  }}
+  @keyframes shake{{
+    0%,100%{{transform:translateX(0)}}
+    20%,60%{{transform:translateX(-6px)}}
+    40%,80%{{transform:translateX(6px)}}
+  }}
+  .shake{{animation:shake .4s ease;}}
+
   /* ── VTG MARCA HEADER ── */
   .vtg-marca-hdr:hover td {{ background:rgba(255,255,255,.025); }}
   .vtg-toggle-btn {{
@@ -1178,6 +1224,18 @@ def gerar_html(kpis, df_merged, df_alocacao, df_gargalos, plano_acao, diagnostic
 </style>
 </head>
 <body>
+<div id="login-overlay">
+  <div class="login-card">
+    <div class="login-logo">VITTA GOLD</div>
+    <div class="login-sub">Planejamento de Pedidos &amp; Estoque</div>
+    <form id="login-form">
+      <input class="login-input" id="login-input" type="password" placeholder="Senha" autocomplete="current-password">
+      <button class="login-btn" type="submit">Entrar</button>
+      <div class="login-error" id="login-error">Senha incorreta. Tente novamente.</div>
+    </form>
+  </div>
+</div>
+
 <header>
   <div class="header-brand">
     <span class="header-logo">VITTA GOLD</span>
@@ -1978,8 +2036,35 @@ function initEstoqueVtg() {{
 // Init first page
 tablesInit['executivo'] = true;
 
-// Remove jQuery/DataTables loading - not needed anymore for grouped pages
-// (Chart.js still loaded, jQuery kept for potential compatibility)
+// ─── LOGIN ────────────────────────────────────────────────────────────────────
+(function() {{
+  const PASS = '{SENHA_DASHBOARD}';
+  const overlay = document.getElementById('login-overlay');
+  const form    = document.getElementById('login-form');
+  const input   = document.getElementById('login-input');
+  const error   = document.getElementById('login-error');
+
+  if (sessionStorage.getItem('vg_auth') === '1') return;
+  overlay.style.display = 'flex';
+  document.body.style.overflow = 'hidden';
+  setTimeout(() => input.focus(), 50);
+
+  form.onsubmit = function(e) {{
+    e.preventDefault();
+    if (input.value === PASS) {{
+      sessionStorage.setItem('vg_auth', '1');
+      overlay.style.display = 'none';
+      document.body.style.overflow = '';
+    }} else {{
+      error.style.display = 'block';
+      input.value = '';
+      input.classList.remove('shake');
+      void input.offsetWidth;
+      input.classList.add('shake');
+      setTimeout(() => input.focus(), 50);
+    }}
+  }};
+}})();
 </script>
 </body>
 </html>"""
